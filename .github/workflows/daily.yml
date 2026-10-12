@@ -56,7 +56,7 @@ jobs:
           import json, os
           from pathlib import Path
           p=Path('web/index.html')
-          p.write_text(p.read_text().replace('content="LOCAL_BUILD"', 'content="'+os.environ['SOURCE_COMMIT']+'"'))
+          p.write_text(p.read_text().replace('LOCAL_BUILD', os.environ['SOURCE_COMMIT']))
           data=json.loads(Path('web/data/latest.json').read_text())
           assert data['meta']['verified'] is True
           assert data['meta']['schema_version']==2
