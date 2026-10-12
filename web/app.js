@@ -9,7 +9,7 @@ let snapshot = null, market = 'ALL', displayed = [], selected = null;
 function notice(message, error=false) { $('notice').hidden=false; $('notice').textContent=message; $('notice').className=`notice ${error?'error':''}`; }
 function chooseTop() {
   const query = $('search').value.trim().toLocaleLowerCase();
-  const rows = snapshot.tracking.filter(r=>r.days<5 && r.last_close!=null && (market==='ALL'||r.market===market) && (!query||r.name.toLocaleLowerCase().includes(query)||r.ticker.includes(query)));
+  const rows = snapshot.tracking.filter(r=>r.days<5 && r.last_close!=null && (market==='ALL'||r.market===market) && (!query||r.name.toLocaleLowerCase().includes(query)||r.ticker.toLocaleLowerCase().includes(query)));
   rows.sort((a,b)=>b.score-a.score||b.signal_date.localeCompare(a.signal_date)||b.ticker.localeCompare(a.ticker));
   const unique = new Map(); rows.forEach(r=>{if(!unique.has(r.ticker))unique.set(r.ticker,r)});
   displayed = [...unique.values()].slice(0,10);
