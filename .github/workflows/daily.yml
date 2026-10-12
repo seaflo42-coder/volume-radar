@@ -1,0 +1,80 @@
+name: Market snapshot and Pages
+on:
+  workflow_dispatch:
+    inputs:
+      refresh_data:
+        description: '배포 전 전체 시세를 새로 수집합니다 (약 20분)'
+        required: true
+        type: boolean
+        default: false
+  # 활성화 전 사용자 승인 필요. 아래는 Asia/Seoul 평일 07:45의 UTC 표현입니다.
+  # schedule:
+  #   - cron: '45 22 * * 0-4'
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: volume-radar-pages
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Test date and signal integrity
+        run: python -m pytest -q
+      - name: Collect actual market data
+        if: github.event_name == 'schedule' || inputs.refresh_data
+        id: collect
+        continue-on-error: true
+        run: python -m pipeline.build
+      - name: Preserve snapshot and publish collection status
+        if: github.event_name == 'schedule' || inputs.refresh_data
+        run: |
+          git config user.name 'volume-radar-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add web/data/latest.json web/data/status.json web/data/provenance.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'chore: update market snapshot and collection status'
+            git push
+          fi
+      - name: Stamp deployment commit and validate published snapshot
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          p=Path('web/index.html')
+          p.write_text(p.read_text().replace('content="LOCAL_BUILD"', 'content="'+os.environ['SOURCE_COMMIT']+'"'))
+          data=json.loads(Path('web/data/latest.json').read_text())
+          assert data['meta']['verified'] is True
+          assert data['meta']['schema_version']==2
+          assert len(data['top10'])<=10
+          assert data['meta']['market_date']
+          for f in Path('web').rglob('*'):
+              if f.is_file():
+                  text=f.read_text(encoding='utf-8')
+                  assert '/Users/' not in text and 'PRIVATE KEY' not in text
+          PYTHON
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+          retention-days: 1
+      - name: Deploy snapshot including failure notice
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Report failed collection after preserving the previous snapshot
+        if: steps.collect.outcome == 'failure'
+        run: exit 1
