@@ -96,7 +96,7 @@ def test_rejects_bad_provider_rows(rows):
 class FakeProvider:
     evidence=[]
     def __init__(self,d=None):self.d=frame() if d is None else d
-    def universe(self):return {'005930':{'ticker':'005930','name':'테스트 전용 가상 종목','market':'KOSPI'}},{'KOSPI':1,'KOSDAQ':0}
+    def universe(self):return {'005930':{'ticker':'005930','name':'테스트 전용 가상 종목','market':'KOSPI','stock_type':'ordinary'}},{'KOSPI':1,'KOSDAQ':0}
     def history(self,*args):return self.d.copy()
 
 
@@ -105,7 +105,8 @@ NOW=datetime(2026,10,12,17,tzinfo=KST)
 
 def test_snapshot_persists_signal_and_is_repeatable(tmp_path):
     first=run(FakeProvider(),tmp_path,NOW)
-    assert len(first['top10'])==1
+    assert len(first['legacy_top10'])==1
+    assert first['top10']==[]  # Low-liquidity signals remain in history but not the default list.
     assert first['meta']['market_date']=='2026-10-08'
     assert len(first['signals'])==2
     d=frame();d['volume']=100

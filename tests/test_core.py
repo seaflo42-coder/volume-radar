@@ -15,7 +15,7 @@ def test_prior_20_only():
 
 def test_forward_and_status():
     d=compute_signals(fixture())
-    assert signal_state(d,30,35)['status']=='가격 유지'
+    assert signal_state(d,30,35)['status']=='발견일 종가 대비'
     assert forward_test(d)['5']['sample_size']==1
 
 def test_excludes_incomplete_outcome():

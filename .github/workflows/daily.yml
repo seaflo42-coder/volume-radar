@@ -33,6 +33,8 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Test date and signal integrity
         run: python -m pytest -q
+      - name: Test observation filters and freshness UI
+        run: node --test tests/frontend.cjs
       - name: Collect actual market data
         if: github.event_name == 'schedule' || inputs.refresh_data
         id: collect
@@ -59,8 +61,10 @@ jobs:
           p.write_text(p.read_text().replace('LOCAL_BUILD', os.environ['SOURCE_COMMIT']))
           data=json.loads(Path('web/data/latest.json').read_text())
           assert data['meta']['verified'] is True
-          assert data['meta']['schema_version']==2
+          assert data['meta']['schema_version']==3
           assert len(data['top10'])<=10
+          assert all(r['default_eligible'] and r['stock_type']=='ordinary' and r['liquidity_pass'] for r in data['top10'])
+          assert data['meta']['automatic_refresh_enabled'] is False
           assert data['meta']['market_date']
           for f in Path('web').rglob('*'):
               if f.is_file():

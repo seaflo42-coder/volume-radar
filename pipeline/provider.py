@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from pipeline.screening import KIND_URL, parse_kind, classify
 import exchange_calendars as xc
 import pandas as pd
 import requests
@@ -127,6 +128,17 @@ class NaverProvider:
             if counts[market] < minimum:
                 raise ValueError(f'{market} 종목 목록 불완전')
         return stocks, counts
+
+    def classify_universe(self, stocks):
+        try:
+            listed=parse_kind(self.get(KIND_URL))
+            if len(listed)<2000: raise ValueError('KIND 목록 불완전')
+            self.classification_status={'state':'ok','source':KIND_URL,'listed_count':len(listed),
+                                        'checked_at':datetime.now(KST).isoformat()}
+        except Exception as exc:
+            listed={}
+            self.classification_status={'state':'error','source':KIND_URL,'message':str(exc)[:180]}
+        return {code:{**info,**classify(info,listed)} for code,info in stocks.items()}
 
     def history(self, ticker, start, end):
         key = f'{ticker}_{start}_{end}.txt'

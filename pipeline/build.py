@@ -9,7 +9,8 @@ import uuid
 import numpy as np
 import pandas as pd
 from pipeline.provider import NaverProvider, KST, expected_date, sessions, SOURCE
-from pipeline.core import compute_signals, score_signal, signal_state, outcome_rows, summarize
+from pipeline.core import compute_signals, score_signal, score_parts, outcome_rows, summarize
+from pipeline.screening import eligible, liquidity_pass, ranked_unique, MIN_MEDIAN_TURNOVER, MIN_SIGNAL_TURNOVER
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'web' / 'data'
@@ -38,6 +39,7 @@ def build(provider, now, data_dir=DATA):
     old = read_json(data_dir/'latest.json', {})
     old_ledger = old.get('signals', [])
     universe, counts = provider.universe()
+    if hasattr(provider,'classify_universe'): universe=provider.classify_universe(universe)
     logging.info('시장 목록 %s / 기준일 %s', counts, end)
     errors, frames, details, new_rows = [], {}, {}, []
     for index, (ticker, info) in enumerate(sorted(universe.items())):
@@ -53,6 +55,8 @@ def build(provider, now, data_dir=DATA):
                 new_rows.append({**info, **row, 'volume_ratio':number(at['volume_ratio']),
                                  'signal_change_pct':number(at['change_pct']),
                                  'turnover_estimate':number(at['turnover']), 'score':score_signal(at),
+                                 'median_turnover20':number(at['median_turnover20']),
+                                 'score_breakdown':score_parts(at),
                                  'first_seen_at':now.isoformat(), 'origin':'reconstructed'})
         except Exception as exc:
             errors.append({'ticker':ticker,'reason':str(exc)[:180]})
@@ -81,6 +85,19 @@ def build(provider, now, data_dir=DATA):
         source_base = d.loc[signal_stamp, 'close'] if d is not None and signal_stamp in d.index else None
         revised = source_base is not None and pd.notna(source_base) and not np.isclose(float(source_base),row['signal_close'],rtol=0,atol=.01)
         row['price_revision_detected'] = bool(revised)
+        for field in ('stock_type','type_label','type_confidence','type_reason'):
+            row[field]=universe.get(ticker,{}).get(field, 'unknown' if field=='stock_type' else '유형 미확인')
+        row['screening_as_of']=now.date().isoformat()
+        row['current_volume']=number(d.iloc[-1]['volume']) if d is not None else None
+        # Enrich existing discovery records without changing their original score or price.
+        if source_base is not None and not revised:
+            at=d.loc[signal_stamp]
+            row['turnover_estimate']=number(at['turnover'])
+            row['median_turnover20']=number(at['median_turnover20'])
+            parts=score_parts(at)
+            row['score_breakdown']=parts if np.isclose(parts['total'],row['score'],atol=.05) else None
+        row['liquidity_pass']=liquidity_pass(row) and not revised
+        row['default_eligible']=eligible(row)
         if revised:
             # Never divide a revised/split-adjusted future price by an incompatible saved base.
             row['status'] = '가격 기준 변경'
@@ -98,8 +115,7 @@ def build(provider, now, data_dir=DATA):
             row['last_close'] = close if close and close > 0 else None
             value = (close/row['signal_close']-1)*100 if close and close>0 else None
             row['since_signal_pct'] = round(value,2) if value is not None else None
-            row['status'] = ('시세 확인 필요' if value is None else '신규 발견' if days==0 else
-                             '가격 이탈' if value < -2 else '가격 유지' if value>=0 else '주의 관찰')
+            row['status'] = ('시세 확인 필요' if value is None else '신규 발견' if days==0 else '발견일 종가 대비')
             if 0 <= days <= 5:
                 details[ticker] = [{ 'date':str(idx.date()), **{c:number(r[c]) for c in ['open','high','low','close','volume','baseline']}}
                                    for idx,r in d.tail(65).iterrows()]
@@ -110,14 +126,19 @@ def build(provider, now, data_dir=DATA):
     for r in recent:
         # One stock in TOP 10; highest signal-day score across the five-session window.
         if r['ticker'] not in unique: unique[r['ticker']] = r
-    top = list(unique.values())[:10]
+    legacy_top = list(unique.values())[:10]
+    default_candidates=ranked_unique(r for r in recent if r['default_eligible'])
+    top = default_candidates[:10]
+    type_counts={kind:len(ranked_unique(r for r in recent if r.get('stock_type')==kind)) for kind in ('ordinary','spac','preferred','other','unknown')}
+    ordinary_codes={r['ticker'] for r in recent if r.get('stock_type')=='ordinary'}
+    liquid_ordinary_codes={r['ticker'] for r in recent if r.get('stock_type')=='ordinary' and r['liquidity_pass']}
     ledger_rows = sorted(ledger.values(),key=lambda r:(r['signal_date'],r['ticker']))
     complete = datetime.now(KST)
     source_times = [r['retrieved_at'] for r in provider.evidence if r.get('retrieved_at')]
     next_dates = sessions(end + timedelta(days=1), end+timedelta(days=35))
     next_due = str(next_dates[0].date())+'T18:00:00+09:00'
     payload = {'meta':{
-        'schema_version':2, 'snapshot_id':uuid.uuid4().hex, 'verified':True,
+        'schema_version':3, 'snapshot_id':uuid.uuid4().hex, 'verified':True,
         'market_date':str(end), 'expected_market_date':str(end), 'generated_at':complete.isoformat(),
         'started_at':now.isoformat(), 'oldest_source_retrieval':min(source_times) if source_times else None,
         'newest_source_retrieval':max(source_times) if source_times else None, 'next_update_due':next_due, 'timezone':'Asia/Seoul',
@@ -129,12 +150,21 @@ def build(provider, now, data_dir=DATA):
         'today_signal_count':sum(r['signal_date']==str(end) for r in ledger_rows),
         'price_revision_count':sum(bool(r.get('price_revision_detected')) for r in ledger_rows),
         'tracking_stock_count':len({r['ticker'] for r in tracking}),
+        'default_candidate_count':len(default_candidates), 'automatic_refresh_enabled':False,
+        'classification_status':getattr(provider,'classification_status',{'state':'test'}),
+        'screening_summary':{'original_recent_stocks':len(unique),'default_candidates':len(default_candidates),
+                             'by_type':type_counts,
+                             'ordinary_liquidity_excluded':len(ordinary_codes-liquid_ordinary_codes),
+                             'ordinary_other_excluded':len(liquid_ordinary_codes)-len(default_candidates)},
         'history_start':str(start), 'history_end':str(end),
         'rules':{'volume_multiple':3,'baseline_sessions':20,'max_abs_change_pct':3,'lookback_sessions':5,'min_turnover':0},
-        'turnover_method':'종가 × 거래량 추정치. 실제 거래대금 필터 미적용.',
+        'observation_filter':{'version':'2026-10-13-v1','fixed_before_collection':True,
+                              'signal_turnover_min':MIN_SIGNAL_TURNOVER,'prior20_median_turnover_min':MIN_MEDIAN_TURNOVER,
+                              'type':'ordinary','reason':'하루 급증과 평소 거래 규모를 함께 확인하기 위한 운영 기준. 수익률 최적화·안전성 검증 기준 아님.'},
+        'turnover_method':'종가 × 거래량 추정치. 실제 체결 거래대금·호가 깊이와 다르며 매매 가능성을 보장하지 않음.',
         'price_policy':'18시 KST 이전에는 직전 거래일 일봉만 사용. 휴장일은 XKRX 캘린더로 확인.',
         'backtest_method':'수집 시점 상장 종목의 전체 신호. 신호일 종가 대비 5·10·20거래일 종가 변화. 거래비용·세금·배당 미반영. 상장폐지 종목 누락에 따른 생존자 편향, 중복 신호 및 제공처 수정주가 영향 존재. 전략 수익률 아님.',
-    }, 'top10':top, 'tracking':sorted(tracking,key=lambda r:(r['signal_date'],r['score']),reverse=True),
+    }, 'top10':top, 'legacy_top10':legacy_top, 'tracking':sorted(tracking,key=lambda r:(r['signal_date'],r['score']),reverse=True),
        'signals':ledger_rows, 'backtest':summarize(ledger_rows), 'charts':details,
        'daily_history':[{'market_date':s, 'count':sum(r['signal_date']==s for r in ledger_rows)} for s in sorted({r['signal_date'] for r in ledger_rows})]}
     # The UI reads one atomic snapshot, so rankings, charts, and outcomes cannot be mixed.

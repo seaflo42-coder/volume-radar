@@ -11,6 +11,7 @@ def compute_signals(frame, min_turnover=0, volume_multiple=3.0, max_move=3.0):
     for c in ['open','high','low','close','volume','turnover']:
         d[c] = pd.to_numeric(d[c], errors='coerce')
     d['baseline'] = d['volume'].shift(1).rolling(20, min_periods=20).mean()
+    d['median_turnover20'] = d['turnover'].shift(1).rolling(20, min_periods=20).median()
     d['volume_ratio'] = d['volume'] / d['baseline'].replace(0, np.nan)
     d['change_pct'] = d['close'].pct_change(fill_method=None) * 100
     d['close_position'] = (d['close']-d['low'])/(d['high']-d['low']).replace(0,np.nan)
@@ -27,20 +28,22 @@ def signal_state(d, signal_pos, current_pos):
         status = '시세 확인 필요'
     elif days == 0:
         status = '신규 발견'
-    elif performance < -2:
-        status = '가격 이탈'
-    elif performance >= 0:
-        status = '가격 유지'
     else:
-        status = '주의 관찰'
+        status = '발견일 종가 대비'
     return {'days':days,'since_signal_pct':round(performance,2) if performance is not None else None,'status':status}
 
 
 def score_signal(row, retention_pct=0.0, days=0):
+    return score_parts(row)['total']
+
+
+def score_parts(row):
     ratio, change = float(row['volume_ratio']), abs(float(row['change_pct']))
     position = float(row.get('close_position',0.5))
     if not np.isfinite(position): position = 0.5
-    return round(min(35,max(0,(ratio-3)*8+20)) + max(0,25-change*7) + max(0,min(15,position*15)),1)
+    volume=min(35,max(0,(ratio-3)*8+20)); change_score=max(0,25-change*7); close=max(0,min(15,position*15))
+    return {'volume':round(volume,2),'close_change':round(change_score,2),'close_position':round(close,2),
+            'total':round(volume+change_score+close,1)}
 
 
 def outcome_rows(d, horizons=(5,10,20)):
